@@ -794,7 +794,8 @@ class TestShouldWarnOnNoChecksumInLocalAndRemoteCache(TestDvc):
             self.message_bar_part, logger.handlers[1].stream.getvalue()
         )
 
-    def test(self):
+    @patch("dvc.prompt.confirm", return_value=False)
+    def test(self, mocked_confirm):
         with ConsoleFontColorsRemover(), MockLoggerHandlers(logger):
             reset_logger_error_output()
 

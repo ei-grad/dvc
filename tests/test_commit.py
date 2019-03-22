@@ -1,8 +1,10 @@
+from mock import patch
 import yaml
+
 from dvc.utils import load_stage_file
+from dvc.stage import StageCommitError
 
 from tests.basic_env import TestDvc
-from dvc.stage import StageCommitError
 
 
 class TestCommitRecursive(TestDvc):
@@ -18,7 +20,8 @@ class TestCommitRecursive(TestDvc):
 
 
 class TestCommitForce(TestDvc):
-    def test(self):
+    @patch("dvc.prompt.confirm", return_value=False)
+    def test(self, mocked_confirm):
         stages = self.dvc.add(self.FOO, no_commit=True)
         self.assertEqual(len(stages), 1)
         stage = stages[0]
@@ -72,7 +75,8 @@ class TestCommitWithDeps(TestDvc):
 
 
 class TestCommitChangedMd5(TestDvc):
-    def test(self):
+    @patch("dvc.prompt.confirm", return_value=False)
+    def test(self, mocked_confirm):
         stages = self.dvc.add(self.FOO, no_commit=True)
         self.assertEqual(len(stages), 1)
         stage = stages[0]

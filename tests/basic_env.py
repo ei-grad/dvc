@@ -2,6 +2,7 @@
 
 from __future__ import unicode_literals
 
+from unittest import TestCase
 import os
 import shutil
 import uuid
@@ -9,7 +10,6 @@ import tempfile
 
 from git import Repo
 from git.exc import GitCommandNotFound
-from unittest import TestCase
 
 import dvc.logger as logger
 from dvc.command.remote import CmdRemoteAdd

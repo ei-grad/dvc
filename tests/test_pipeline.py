@@ -1,11 +1,12 @@
 from dvc.main import main
 
 from tests.basic_env import TestDvc
+from tests.utils import MockIsatty
 from tests.test_repro import TestRepro, TestReproChangedDeepData
 import os
 
 
-class TestPipelineShowSingle(TestDvc):
+class TestPipelineShowSingle(MockIsatty, TestDvc):
     def setUp(self):
         super(TestPipelineShowSingle, self).setUp()
         self.stage = "foo.dvc"
@@ -72,7 +73,7 @@ class TestPipelineShowSingle(TestDvc):
         self.assertNotEqual(ret, 0)
 
 
-class TestPipelineShow(TestRepro):
+class TestPipelineShow(MockIsatty, TestRepro):
     def setUp(self):
         super(TestPipelineShow, self).setUp()
         self.dotFile = "graph.dot"
@@ -147,7 +148,7 @@ class TestPipelineShow(TestRepro):
         self.assertNotEqual(ret, 0)
 
 
-class TestPipelineShowDeep(TestReproChangedDeepData):
+class TestPipelineShowDeep(MockIsatty, TestReproChangedDeepData):
     def setUp(self):
         super(TestPipelineShowDeep, self).setUp()
         self.dotFile = "graph.dot"

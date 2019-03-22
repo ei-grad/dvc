@@ -1,6 +1,7 @@
 import os
 import uuid
 
+from mock import patch
 import mock
 import shutil
 import filecmp
@@ -669,6 +670,8 @@ class TestCmdRunWorkingDirectory(TestDvc):
 class TestRunDeterministicBase(TestDvc):
     def setUp(self):
         super(TestRunDeterministicBase, self).setUp()
+        self.mocked_confirm = patch("dvc.prompt.confirm", return_value=False)
+        self.mocked_confirm.start()
         self.out_file = "out"
         self.stage_file = self.out_file + ".dvc"
         self.cmd = "python {} {} {}".format(self.CODE, self.FOO, self.out_file)
@@ -678,6 +681,9 @@ class TestRunDeterministicBase(TestDvc):
         self.ignore_build_cache = False
 
         self._run()
+
+    def tearDown(self):
+        self.mocked_confirm.stop()
 
     def _run(self):
         self.stage = self.dvc.run(

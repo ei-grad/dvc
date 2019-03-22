@@ -1,12 +1,15 @@
 import os
 
+from mock import patch
+
 from dvc.main import main
 
 from tests.test_repro import TestRepro
 
 
 class TestDestroyNoConfirmation(TestRepro):
-    def test(self):
+    @patch("dvc.prompt.confirm", return_value=False)
+    def test(self, mocked_confirm):
         ret = main(["destroy"])
         self.assertNotEqual(ret, 0)
 

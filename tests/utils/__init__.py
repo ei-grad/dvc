@@ -1,10 +1,12 @@
-import yaml
+from contextlib import contextmanager
 import os
+
+from mock import MagicMock, patch
+
+import yaml
 
 from dvc.scm import Git
 from dvc.utils.compat import StringIO
-from mock import MagicMock
-from contextlib import contextmanager
 
 
 def spy(method_to_decorate):
@@ -48,3 +50,19 @@ def cd(newdir):
         yield
     finally:
         os.chdir(prevdir)
+
+
+class MockIsatty(object):
+
+    isatty_ret_value = False
+
+    def setUp(self):
+        super(MockIsatty, self).setUp()
+        self.isatty_patch = patch(
+            "sys.stdout.isatty", return_value=self.isatty_ret_value
+        )
+        self.isatty_mock = self.isatty_patch.start()
+
+    def tearDown(self):
+        self.isatty_patch.stop()
+        super(MockIsatty, self).tearDown()

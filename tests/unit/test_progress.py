@@ -3,11 +3,15 @@ from unittest import TestCase
 
 from dvc.progress import progress, progress_aware
 
+from tests.utils import MockIsatty
 
-class TestProgressAware(TestCase):
-    @mock.patch("sys.stdout.isatty", return_value=True)
+
+class TestProgressAware(MockIsatty, TestCase):
+
+    isatty_ret_value = True
+
     @mock.patch("dvc.progress.Progress.print")
-    def test(self, mock_print, _):
+    def test(self, mock_print):
         # progress is a global object, can be shared between tests when
         # run in multi-threading environment with pytest
         progress.reset()
