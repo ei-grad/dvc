@@ -3,6 +3,15 @@ from .base import PathBASE
 
 
 class PathGDrive(PathBASE):
+    """Google Drive resource path information
+
+    Args:
+        root: the reference folder ID, root node or
+            regular folder
+        path: a posix-like file path relative to `root`
+
+    """
+
     scheme = Schemes.GDRIVE
 
     def __init__(self, root, url=None, path=None):

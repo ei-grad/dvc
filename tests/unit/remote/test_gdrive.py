@@ -12,6 +12,10 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 
 from dvc.remote.gdrive import RemoteGDrive, GDriveError, GDriveResourceNotFound
 from dvc.remote.gdrive.oauth2 import OAuth2
+from dvc.remote.gdrive.utils import (
+    response_error_message,
+    response_is_ratelimit,
+)
 from dvc.path.gdrive import PathGDrive
 from dvc.repo import Repo
 
@@ -46,21 +50,36 @@ def repo():
 
 @pytest.fixture
 def gdrive(repo):
-    gdrive = RemoteGDrive(repo, {"url": GDRIVE_URL})
-    return gdrive
+    return RemoteGDrive(repo, {"url": GDRIVE_URL})
 
 
 @pytest.fixture
 def gdrive_appfolder(repo):
-    gdrive = RemoteGDrive(repo, {"url": GDRIVE_APPFOLDER_URL})
-    return gdrive
+    return RemoteGDrive(repo, {"url": GDRIVE_APPFOLDER_URL})
 
 
 @pytest.fixture(autouse=True)
 def no_requests(monkeypatch):
-    req_mock = mock.Mock(return_value=Response("test"))
-    monkeypatch.setattr("requests.sessions.Session.request", req_mock)
-    return req_mock
+    mocked = mock.Mock(return_value=Response("test"))
+    monkeypatch.setattr("requests.sessions.Session.request", mocked)
+    return mocked
+
+
+@pytest.fixture()
+def metadata_by_path_mock(gdrive, monkeypatch):
+    mocked = mock.Mock(
+        gdrive.get_metadata_by_path,
+        return_value=dict(id="root", name="root", **FOLDER),
+    )
+    monkeypatch.setattr(gdrive, "get_metadata_by_path", mocked)
+    return mocked
+
+
+@pytest.fixture()
+def search_mock(gdrive, monkeypatch):
+    mocked = mock.Mock(gdrive.search)
+    monkeypatch.setattr(gdrive, "search", mocked)
+    return mocked
 
 
 def _url(url):
@@ -109,9 +128,9 @@ def no_refresh(monkeypatch):
 
 
 @pytest.fixture()
-def makedirs(monkeypatch):
-    mocked = mock.Mock(return_value="FOLDER_ID")
-    monkeypatch.setattr(RemoteGDrive, "makedirs", mocked)
+def makedirs(gdrive, monkeypatch):
+    mocked = mock.Mock(gdrive.makedirs, return_value="FOLDER_ID")
+    monkeypatch.setattr(gdrive, "makedirs", mocked)
     return mocked
 
 
@@ -153,17 +172,17 @@ def test_get_session(gdrive, no_requests):
 
 
 def test_response_is_ratelimit(gdrive):
-    assert gdrive.response_is_ratelimit(
+    assert response_is_ratelimit(
         Response({"error": {"errors": [{"domain": "usageLimits"}]}}, 403)
     )
-    assert not gdrive.response_is_ratelimit(Response(""))
+    assert not response_is_ratelimit(Response(""))
 
 
 def test_response_error_message(gdrive):
     r = Response({"error": {"message": "test"}})
-    assert gdrive.response_error_message(r) == "HTTP 200: test"
+    assert response_error_message(r) == "HTTP 200: test"
     r = Response("test")
-    assert gdrive.response_error_message(r) == "HTTP 200: test"
+    assert response_error_message(r) == "HTTP 200: test"
 
 
 def test_request(gdrive, no_requests):
@@ -220,13 +239,6 @@ def test_request_4xx(gdrive, no_requests):
         gdrive.request("GET", "test")
 
 
-def test_get_metadata_by_id(gdrive, no_requests):
-    gdrive.get_metadata_by_id("test")
-    no_requests.assert_called_once_with(
-        "GET", _url("drive/v3/files/test"), **COMMON_KWARGS
-    )
-
-
 def test_search(gdrive, no_requests):
     no_requests.side_effect = [
         Response({"files": ["test1"], "nextPageToken": "TEST_nextPageToken"}),
@@ -235,7 +247,7 @@ def test_search(gdrive, no_requests):
     assert list(gdrive.search("test", "root")) == ["test1", "test2"]
 
 
-def test_metadata_by_path(gdrive, no_requests, monkeypatch):
+def test_metadata_by_path(gdrive, no_requests):
     no_requests.side_effect = [
         Response(dict(id="root", name="root", **FOLDER)),
         Response({"files": [dict(id="id1", name="path1", **FOLDER)]}),
@@ -266,17 +278,9 @@ def test_metadata_by_path(gdrive, no_requests, monkeypatch):
     ]
 
 
-def test_metadata_by_path_not_a_folder(gdrive, monkeypatch):
-    monkeypatch.setattr(
-        gdrive,
-        "get_metadata_by_id",
-        mock.Mock(return_value=dict(id="id1", name="root", **FOLDER)),
-    )
-    monkeypatch.setattr(
-        gdrive,
-        "search",
-        mock.Mock(return_value=[dict(id="id2", name="path1", **FILE)]),
-    )
+def test_metadata_by_path_not_a_folder(gdrive, no_requests, search_mock):
+    no_requests.return_value = Response(dict(id="id1", name="root", **FOLDER))
+    search_mock.return_value = [dict(id="id2", name="path1", **FILE)]
     with pytest.raises(GDriveError):
         gdrive.get_metadata_by_path(
             "root", "path1/path2", ["field1", "field2"]
@@ -284,79 +288,52 @@ def test_metadata_by_path_not_a_folder(gdrive, monkeypatch):
     gdrive.get_metadata_by_path("root", "path1", ["field1", "field2"])
 
 
-def test_metadata_by_path_duplicate(gdrive, monkeypatch):
-    monkeypatch.setattr(
-        gdrive,
-        "get_metadata_by_id",
-        mock.Mock(return_value=dict(id="id1", name="root", **FOLDER)),
-    )
-    monkeypatch.setattr(
-        gdrive,
-        "search",
-        mock.Mock(
-            return_value=[
-                dict(id="id2", name="path1", **FOLDER),
-                dict(id="id3", name="path1", **FOLDER),
-            ]
-        ),
-    )
+def test_metadata_by_path_duplicate(gdrive, no_requests, search_mock):
+    no_requests.return_value = Response(dict(id="id1", name="root", **FOLDER))
+    search_mock.return_value = [
+        dict(id="id2", name="path1", **FOLDER),
+        dict(id="id3", name="path1", **FOLDER),
+    ]
     with pytest.raises(GDriveError):
         gdrive.get_metadata_by_path(
             "root", "path1/path2", ["field1", "field2"]
         )
 
 
-def test_metadata_by_path_not_found(gdrive, monkeypatch):
-    monkeypatch.setattr(
-        gdrive,
-        "get_metadata_by_id",
-        mock.Mock(return_value=dict(id="root", name="root", **FOLDER)),
-    )
-    monkeypatch.setattr(gdrive, "search", mock.Mock(return_value=[]))
+def test_metadata_by_path_not_found(gdrive, no_requests, search_mock):
+    no_requests.return_value = Response(dict(id="root", name="root", **FOLDER))
+    search_mock.return_value = []
     with pytest.raises(GDriveResourceNotFound):
         gdrive.get_metadata_by_path(
             "root", "path1/path2", ["field1", "field2"]
         )
 
 
-def test_get_file_checksum(gdrive, monkeypatch):
-    monkeypatch.setattr(
-        gdrive,
-        "get_metadata_by_path",
-        mock.Mock(
-            return_value=dict(id="id1", name="path1", md5Checksum="checksum")
-        ),
+def test_get_file_checksum(gdrive, metadata_by_path_mock):
+    metadata_by_path_mock.return_value = dict(
+        id="id1", name="path1", md5Checksum="checksum"
     )
     checksum = gdrive.get_file_checksum(PathGDrive(gdrive.root, path="path1"))
     assert checksum == "checksum"
-    gdrive.get_metadata_by_path.assert_called_once_with(
-        gdrive.root, "path1", params={"fields": "md5Checksum"}
+    metadata_by_path_mock.assert_called_once_with(
+        gdrive.root, "path1", fields=["md5Checksum"]
     )
 
 
-def test_list_cache_paths(gdrive, monkeypatch):
-    monkeypatch.setattr(
-        gdrive,
-        "get_metadata_by_path",
-        mock.Mock(return_value=dict(id="root", name="root", **FOLDER)),
-    )
-    files_lists = [
+def test_list_cache_paths(gdrive, metadata_by_path_mock, search_mock):
+    metadata_by_path_mock.return_value = dict(id="root", name="root", **FOLDER)
+    search_mock.side_effect = [
         [dict(id="f1", name="f1", **FOLDER), dict(id="f2", name="f2", **FILE)],
         [dict(id="f3", name="f3", **FILE)],
     ]
-    monkeypatch.setattr(gdrive, "search", mock.Mock(side_effect=files_lists))
     assert list(gdrive.list_cache_paths()) == ["data/f1/f3", "data/f2"]
-    gdrive.get_metadata_by_path.assert_called_once_with("root", "data")
+    metadata_by_path_mock.assert_called_once_with("root", "data")
 
 
-def test_list_cache_path_not_found(gdrive, monkeypatch):
-    monkeypatch.setattr(
-        gdrive,
-        "get_metadata_by_path",
-        mock.Mock(side_effect=GDriveResourceNotFound("test")),
-    )
+def test_list_cache_path_not_found(gdrive, metadata_by_path_mock):
+    metadata_by_path_mock.side_effect = GDriveResourceNotFound("test")
     assert list(gdrive.list_cache_paths()) == []
-    gdrive.get_metadata_by_path.assert_called_once_with("root", "data")
+    metadata_by_path_mock.assert_called_once_with("root", "data")
 
 
 def test_mkdir(gdrive, no_requests):
@@ -375,21 +352,17 @@ def test_mkdir(gdrive, no_requests):
     )
 
 
-def test_makedirs(gdrive, monkeypatch):
-    monkeypatch.setattr(
-        gdrive,
-        "get_metadata_by_path",
-        mock.Mock(
-            side_effect=[
-                dict(id="id1", name="test1", **FOLDER),
-                GDriveResourceNotFound("test1/test2"),
-            ]
-        ),
-    )
+def test_makedirs(gdrive, monkeypatch, metadata_by_path_mock):
+    metadata_by_path_mock.side_effect = [
+        dict(id="id1", name="test1", **FOLDER),
+        GDriveResourceNotFound("test1/test2"),
+    ]
     monkeypatch.setattr(
         gdrive, "mkdir", mock.Mock(side_effect=[{"id": "id2"}])
     )
-    assert gdrive.makedirs(gdrive.root, "test1/test2") == "id2"
+    assert (
+        gdrive.makedirs(PathGDrive(gdrive.root, path="test1/test2")) == "id2"
+    )
     assert gdrive.get_metadata_by_path.mock_calls == [
         mock.call(gdrive.root, "test1"),
         mock.call("id1", "test2"),
@@ -397,14 +370,10 @@ def test_makedirs(gdrive, monkeypatch):
     assert gdrive.mkdir.mock_calls == [mock.call("id1", "test2")]
 
 
-def test_makedirs_error(gdrive, monkeypatch):
-    monkeypatch.setattr(
-        gdrive,
-        "get_metadata_by_path",
-        mock.Mock(side_effect=[dict(id="id1", name="test1", **FILE)]),
-    )
+def test_makedirs_error(gdrive, metadata_by_path_mock):
+    metadata_by_path_mock.side_effect = [dict(id="id1", name="test1", **FILE)]
     with pytest.raises(GDriveError):
-        gdrive.makedirs(gdrive.root, "test1/test2")
+        gdrive.makedirs(PathGDrive(gdrive.root, path="test1/test2"))
 
 
 def test_resumable_upload_first_request(gdrive, no_requests):

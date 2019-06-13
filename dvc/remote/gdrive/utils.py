@@ -41,3 +41,50 @@ def only_once(func):
         return results[key]
 
     return wrapped
+
+
+def response_error_message(response):
+    try:
+        message = response.json()["error"]["message"]
+    except (TypeError, KeyError):
+        message = response.text
+    return "HTTP {}: {}".format(response.status_code, message)
+
+
+def response_is_ratelimit(response):
+    if response.status_code not in (403, 429):
+        return False
+    errors = response.json()["error"]["errors"]
+    domains = [i["domain"] for i in errors]
+    return "usageLimits" in domains
+
+
+class MetadataCache(object):
+    """Remembers the metadata for folders traversal
+    """
+
+    def __init__(self, gdrive):
+        self.gdrive = gdrive
+        self.lock = threading.Lock()
+        self.locks = {}
+        self.storage = {}
+
+    def _fetch(self, parent, path):
+        key = (parent, path)
+        with self.lock:
+            if key not in self.locks:
+                self.locks[key] = threading.Lock()
+        with self.locks[key]:
+            if key not in self.storage:
+                self.storage[key] = self.gdrive.get_metadata_by_path(
+                    parent, path
+                )
+        return self.storage[key]
+
+    def get(self, parent, path):
+        key = (parent, path)
+        ret = self.storage.get(key)
+        if ret is None:
+            return self._fetch(parent, path)
+        else:
+            return self.storage[key]

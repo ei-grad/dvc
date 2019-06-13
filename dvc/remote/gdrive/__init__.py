@@ -20,39 +20,56 @@ from dvc.utils.compat import urlparse, makedirs
 from dvc.remote.base import RemoteBASE
 from dvc.config import Config
 from dvc.progress import progress
-from dvc.remote.gdrive.utils import track_progress, only_once
+from dvc.remote.gdrive.utils import (
+    track_progress,
+    only_once,
+    response_error_message,
+    response_is_ratelimit,
+    MetadataCache,
+)
+from dvc.remote.gdrive.exceptions import (
+    GDriveError,
+    GDriveHTTPError,
+    GDriveResourceNotFound,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
-class GDriveError(Exception):
-    pass
-
-
-class GDriveResourceNotFound(GDriveError):
-    def __init__(self, path):
-        super(GDriveResourceNotFound, self).__init__(
-            "'{}' resource not found".format(path)
-        )
-
-
 class RemoteGDrive(RemoteBASE):
     """Google Drive remote implementation
 
-    Example URLs:
+    Google Drive differs from the
 
-    Datasets/my-dataset inside "My Drive" folder:
+    ## Resource file names and identification
+
+    - resources are identified by their IDs
+    - resource can have multiple parent folders
+    - folders are regular resources with an
+      `application/vnd.google-apps.folder` MIME type
+    - there could be multiple resources with the same name linked to
+      a single folder (names could be duplicated)
+    - there are multiple root folders accessible from a single user
+      account:
+        - `root` - special ID, alias for the "My Drive" folder
+        - `appDataFolder` - special ID, alias for the hidden application
+          space folder
+        - shared drives root folders
+
+    ## Example URLs for Google Drive remote:
+
+    - Datasets/my-dataset inside "My Drive" folder:
 
         gdrive://root/Datasets/my-dataset
 
-    Folder by ID (recommended):
+    - Folder by ID (recommended):
 
         gdrive://1r3UbnmS5B4-7YZPZmyqJuCxLVps1mASC
 
         (get it https://drive.google.com/drive/folders/{here})
 
-    Dataset named "my-dataset" in the hidden application folder:
+    - Dataset named "my-dataset" in the hidden application folder:
 
         gdrive://appDataFolder/my-dataset
 
@@ -115,11 +132,13 @@ class RemoteGDrive(RemoteBASE):
 
         self.prefix = parsed.path.strip("/")
 
+        self.metadata_cache = MetadataCache(self)
+
         self.max_retries = 10
 
     @property
     def path_info(self):
-        return PathGDrive(root=self.root)
+        return PathGDrive(root=self.root, url=self.url)
 
     @property
     def session(self):
@@ -136,20 +155,6 @@ class RemoteGDrive(RemoteBASE):
             self._session = self.oauth2.get_session()
         return self._session
 
-    def response_is_ratelimit(self, response):
-        if response.status_code not in (403, 429):
-            return False
-        errors = response.json()["error"]["errors"]
-        domains = [i["domain"] for i in errors]
-        return "usageLimits" in domains
-
-    def response_error_message(self, response):
-        try:
-            message = response.json()["error"]["message"]
-        except Exception:
-            message = response.text
-        return "HTTP {}: {}".format(response.status_code, message)
-
     def request(self, method, path, *args, **kwargs):
         # Google Drive has tight rate limits, which strikes the
         # performance and gives the 403 and 429 errors.
@@ -163,10 +168,7 @@ class RemoteGDrive(RemoteBASE):
             response = self.session.request(
                 method, self.GOOGLEAPIS_BASE_URL + path, *args, **kwargs
             )
-            if (
-                self.response_is_ratelimit(response)
-                or response.status_code >= 500
-            ):
+            if response_is_ratelimit(response) or response.status_code >= 500:
                 logger.debug(
                     "got {} response, will retry in {} sec".format(
                         response.status_code, exponential_backoff
@@ -177,13 +179,8 @@ class RemoteGDrive(RemoteBASE):
             else:
                 break
         if response.status_code >= 400:
-            raise GDriveError(self.response_error_message(response))
+            raise GDriveHTTPError(response)
         return response
-
-    def get_metadata_by_id(self, file_id, **kwargs):
-        return self.request(
-            "GET", "drive/v3/files/" + file_id, **kwargs
-        ).json()
 
     def search(self, parent=None, name=None, add_params={}):
         query = []
@@ -202,7 +199,7 @@ class RemoteGDrive(RemoteBASE):
             params["pageToken"] = data["nextPageToken"]
 
     def get_metadata_by_path(self, root, path, fields=[]):
-        parent = self.get_metadata_by_id(root)
+        parent = self.request("GET", "drive/v3/files/" + root).json()
         current_path = ["gdrive://" + parent["id"]]
         parts = path.split("/")
         # only specify fields for the last search query
@@ -232,7 +229,7 @@ class RemoteGDrive(RemoteBASE):
 
     def get_file_checksum(self, path_info):
         metadata = self.get_metadata_by_path(
-            path_info.root, path_info.path, params={"fields": "md5Checksum"}
+            path_info.root, path_info.path, fields=["md5Checksum"]
         )
         return metadata["md5Checksum"]
 
@@ -263,13 +260,14 @@ class RemoteGDrive(RemoteBASE):
         }
         return self.request("POST", "drive/v3/files", json=data).json()
 
-    @only_once
-    def makedirs(self, parent, path):
+    def makedirs(self, path_info):
         current_path = []
+        parent = path_info.root
+        path = path_info.path
         for part in path.split("/"):
             current_path.append(part)
             try:
-                metadata = self.get_metadata_by_path(parent, part)
+                metadata = self.children_cache.get(parent, part)
                 if not self.metadata_isdir(metadata):
                     raise GDriveError(
                         "{} is not a folder".format("/".join(current_path))
@@ -330,11 +328,11 @@ class RemoteGDrive(RemoteBASE):
             elif response.status_code == 404:
                 # restarting upload from the beginning wouldn't make a
                 # profit, so it is better to notify the user
-                raise GDriveError("resumable upload URL has been expired")
+                raise GDriveError("upload failed, try again")
             elif response.status_code != 308:
                 logger.error(
                     "upload resume failure: {}".format(
-                        self.response_error_message(response)
+                        response_error_message(response)
                     )
                 )
                 return False
@@ -382,7 +380,10 @@ class RemoteGDrive(RemoteBASE):
 
         dirname = posixpath.dirname(to_info.path).strip("/")
         if dirname:
-            parent = self.makedirs(to_info.root, dirname)
+            try:
+                parent = self.metadata_cache.get(to_info.root, dirname)
+            except GDriveResourceNotFound:
+                parent = self.makedirs(PathGDrive(to_info.root, path=dirname))
         else:
             parent = to_info.root
 
@@ -456,13 +457,7 @@ class RemoteGDrive(RemoteBASE):
         )
         current = 0
         if response.status_code != 200:
-            try:
-                message = response.json()["error"]["message"]
-            except Exception:
-                message = response.text
-            raise GDriveError(
-                "HTTP {}: {}".format(response.status_code, message)
-            )
+            raise GDriveHTTPError(response)
         makedirs(os.path.dirname(to_info.path), exist_ok=True)
         tmp_file = tmp_fname(to_info.path)
         with open(tmp_file, "wb") as f:
